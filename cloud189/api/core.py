@@ -132,48 +132,100 @@ class Cloud189(object):
         return Cloud189.FAILED
 
     def login(self, username, password):
-        """使用 用户名+密码 登录"""
-        url = self._host_url + "/api/portal/loginUrl.action"
-        params = {"pageId": 1, "redirectURL": "https://cloud.189.cn/main.action"}
-        resp = self._get(url, params=params)
-        if not resp:
-            logger.error("redirect error!")
-            return Cloud189.NETWORK_ERROR
-        # captchaToken = re.search(r"captchaToken' value='(.+?)'", resp.text)
-        captchaToken = re.search(r"captchaToken\W*value=\W*(\w*)", resp.text)
-        # returnUrl = re.search(r"returnUrl = '(.+?)'", resp.text)
-        returnUrl = re.search(r"returnUrl =\W*([^'\"]*)", resp.text)
-        # paramId = re.search(r'paramId *=\W*(\w*)', resp.text)
-        paramId = re.search(r'paramId =\W*(\w*)', resp.text)
-        # lt = re.search(r'lt = "(.+?)"', resp.text)
-        lt = re.search(r'lt =\W+(\w*)', resp.text)
+        """使用 用户名+密码 登录，本修改基于以下链接"""
+        """https://github.com/vistal8/tianyiyun/blob/main/tianyiyun.py"""
+        import base64
+        import rsa
+        
+        BI_RM = list("0123456789abcdefghijklmnopqrstuvwxyz")
+        B64MAP = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+                
+        def int2char(a):
+            return BI_RM[a]
+        
+        def b64tohex(a):
+            d = ""
+            e = 0
+            c = 0
+            for i in range(len(a)):
+                if list(a)[i] != "=":
+                    v = B64MAP.index(list(a)[i])
+                    if 0 == e:
+                        e = 1
+                        d += int2char(v >> 2)
+                        c = 3 & v
+                    elif 1 == e:
+                        e = 2
+                        d += int2char(c << 2 | v >> 4)
+                        c = 15 & v
+                    elif 2 == e:
+                        e = 3
+                        d += int2char(c)
+                        d += int2char(v >> 2)
+                        c = 3 & v
+                    else:
+                        e = 0
+                        d += int2char(c << 2 | v >> 4)
+                        d += int2char(15 & v)
+            if e == 1:
+                d += int2char(c << 2)
+            return d
+        
+        def rsa_encode(j_rsakey, string):
+            rsa_key = f"-----BEGIN PUBLIC KEY-----\n{j_rsakey}\n-----END PUBLIC KEY-----"
+            pubkey = rsa.PublicKey.load_pkcs1_openssl_pem(rsa_key.encode())
+            result = b64tohex((base64.b64encode(rsa.encrypt(f'{string}'.encode(), pubkey))).decode())
+            return result
 
-        captchaToken = captchaToken.group(1) if captchaToken else ""
-        lt = lt.group(1) if lt else ""
-        returnUrl = returnUrl.group(1) if returnUrl else ""
-        paramId = paramId.group(1) if paramId else ""
-        logger.debug(f"Login: {captchaToken=}, {lt=}, {returnUrl=}, {paramId=}")
-        self._session.headers.update({"lt": lt})
-
-        validateCode = self._needcaptcha(captchaToken, username)
-        url = self._auth_url + "loginSubmit.do"
+        urlToken = "https://m.cloud.189.cn/udb/udb_login.jsp?pageId=1&pageKey=default&clientType=wap&redirectURL=https://m.cloud.189.cn/zhuanti/2021/shakeLottery/index.html"
+        r = self._get(urlToken)
+        pattern = r"https?://[^\s'\"]+"  # 匹配以http或https开头的url
+        match = re.search(pattern, r.text)  # 在文本中搜索匹配
+        if match:  # 如果找到匹配
+            url = match.group()  # 获取匹配的字符串
+        else:  # 如果没有找到匹配
+            print("没有找到url")
+        
+        r = self._get(url)
+        pattern = r"<a id=\"j-tab-login-link\"[^>]*href=\"([^\"]+)\""  # 匹配id为j-tab-login-link的a标签，并捕获href引号内的内容
+        match = re.search(pattern, r.text)  # 在文本中搜索匹配
+        if match:  # 如果找到匹配
+            href = match.group(1)  # 获取捕获的内容
+        else:  # 如果没有找到匹配
+            print("没有找到href链接")
+        
+        r = self._get(href)
+        captchaToken = re.findall(r"captchaToken' value='(.+?)'", r.text)[0]
+        lt = re.findall(r'lt = "(.+?)"', r.text)[0]
+        returnUrl = re.findall(r"returnUrl= '(.+?)'", r.text)[0]
+        paramId = re.findall(r'paramId = "(.+?)"', r.text)[0]
+        j_rsakey = re.findall(r'j_rsaKey" value="(\S+)"', r.text, re.M)[0]
+        self._headers.update({"lt": lt})
+        
+        username = rsa_encode(j_rsakey, username)
+        password = rsa_encode(j_rsakey, password)
+        url = "https://open.e.189.cn/api/logbox/oauth2/loginSubmit.do"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:74.0) Gecko/20100101 Firefox/76.0',
+            'Referer': 'https://open.e.189.cn/',
+        }
         data = {
             "appKey": "cloud",
             "accountType": '01',
-            "userName": "{RSA}" + b64tohex(encrypt(username)),
-            "password": "{RSA}" + b64tohex(encrypt(password)),
-            "validateCode": validateCode,
+            "userName": f"{{RSA}}{username}",
+            "password": f"{{RSA}}{password}",
+            "validateCode": "",
             "captchaToken": captchaToken,
             "returnUrl": returnUrl,
             "mailSuffix": "@189.cn",
             "paramId": paramId
         }
-        r = self._post(url, data=data)
+        r = self._post(url, data=data, headers=self._headers, timeout=5)
+        print(href,r.json())
         msg = r.json()["msg"]
         if msg == "登录成功":
             self._get(r.json()["toUrl"])
             return Cloud189.SUCCESS
-        print(msg)
         return Cloud189.FAILED
 
     def _get_root_more_page(self, resp: dict, r_path=False) -> (list, bool):
